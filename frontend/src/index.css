@@ -1,0 +1,119 @@
+/* =========================================================
+   TOKENS
+   Ballpoint blue, red-pen margin, highlighter yellow on paper.
+========================================================= */
+
+:root {
+  --paper: #f3f5fa;
+  --sheet: #ffffff;
+  --ink: #101a2e;
+  --ink-soft: #4b5873;
+  --rule: #d3d9e8;
+
+  --pen: #2338c9;
+  --pen-soft: #e6eafc;
+  --marker: #ffe45c;
+  --marker-ink: #101a2e;
+  --red: #d6392b;
+  --red-soft: #fbe7e4;
+
+  --ui: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --read: "Literata", Georgia, "Times New Roman", serif;
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #0d1322;
+    --sheet: #141b2e;
+    --ink: #e9edf7;
+    --ink-soft: #a0acc5;
+    --rule: #283250;
+
+    --pen: #93a5ff;
+    --pen-soft: #1d2748;
+    --marker: #f0d43a;
+    --red: #ff8577;
+    --red-soft: #3a1e24;
+  }
+}
+
+/* =========================================================
+   RESET
+========================================================= */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+
+  background: var(--paper);
+  color: var(--ink);
+
+  font: 400 1rem/1.5 var(--ui);
+
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#root {
+  min-height: 100svh;
+}
+
+h1,
+h2,
+h3,
+p,
+ul,
+ol {
+  margin: 0;
+}
+
+ul {
+  padding: 0;
+  list-style: none;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 3px solid var(--pen);
+  outline-offset: 3px;
+}
+
+::selection {
+  background: var(--marker);
+  color: var(--marker-ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
