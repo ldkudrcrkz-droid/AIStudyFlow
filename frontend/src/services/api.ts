@@ -78,6 +78,7 @@ async function request<T>(
 
 class DirectUploadFailedError extends Error {}
 
+
 async function uploadPdfDirect(
   file: File
 ): Promise<DocumentDetail> {
@@ -103,14 +104,29 @@ async function uploadPdfDirect(
     "Could not start the upload."
   );
 
-  const { error } = await storage.storage
-    .from(target.bucket)
-    .uploadToSignedUrl(target.path, target.token, file, {
-      contentType: "application/pdf",
-    });
+  let uploadError: unknown = null;
 
-  if (error) {
-    throw new DirectUploadFailedError(error.message);
+  try {
+    const { error } = await storage.storage
+      .from(target.bucket)
+      .uploadToSignedUrl(target.path, target.token, file, {
+        contentType: "application/pdf",
+      });
+
+    uploadError = error;
+  } catch (err) {
+   
+    uploadError = err;
+  }
+
+  if (uploadError) {
+   
+    const message =
+      uploadError instanceof Error
+        ? uploadError.message
+        : String(uploadError);
+
+    throw new DirectUploadFailedError(message);
   }
 
   return request<DocumentDetail>(
@@ -131,7 +147,11 @@ async function uploadPdfDirect(
   );
 }
 
-
+/*
+  Same-origin fallback: send the file straight to our backend, which
+  uploads it to storage itself server-side. Used only when the direct
+  upload above is blocked, since it's limited to smaller files.
+*/
 async function uploadPdfViaBackend(
   file: File
 ): Promise<DocumentDetail> {
