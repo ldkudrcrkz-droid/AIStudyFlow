@@ -5,6 +5,7 @@ import UploadSection from "./components/UploadSection";
 import DocumentLibrary from "./components/DocumentLibrary";
 import AnalysisSection from "./components/AnalysisSection";
 import AskStudyFlow from "./components/AskStudyFlow";
+import ConfirmDialog from "./components/ConfirmDialog";
 
 import {
   deleteDocument,
@@ -82,8 +83,10 @@ function App() {
   const [openingId, setOpeningId] =
     useState<string | null>(null);
 
-  // Checklist saves run one after another, so an older
-  // save can never land after a newer one.
+  // Document pending delete confirmation, if any
+  const [pendingDeleteId, setPendingDeleteId] =
+    useState<string | null>(null);
+
   const saveQueue = useRef<Promise<void>>(
     Promise.resolve()
   );
@@ -195,23 +198,22 @@ function App() {
     }
   };
 
-  const handleDelete = async (id: string) => {
-    const target = documents.find(
-      (item) => item.id === id
-    );
+  const handleDeleteRequest = (id: string) => {
+    setPendingDeleteId(id);
+  };
 
-    const label =
-      target?.title ||
-      target?.filename ||
-      "this document";
+  const handleDeleteCancel = () => {
+    setPendingDeleteId(null);
+  };
 
-    if (
-      !window.confirm(
-        `Delete "${label}"? This can't be undone.`
-      )
-    ) {
+  const handleDeleteConfirm = async () => {
+    const id = pendingDeleteId;
+
+    if (!id) {
       return;
     }
+
+    setPendingDeleteId(null);
 
     setNotice("");
 
@@ -236,6 +238,15 @@ function App() {
       );
     }
   };
+
+  const pendingDeleteDoc = documents.find(
+    (item) => item.id === pendingDeleteId
+  );
+
+  const pendingDeleteLabel =
+    pendingDeleteDoc?.title ||
+    pendingDeleteDoc?.filename ||
+    "this document";
 
   const handleToggleRequirement = (
     index: number
@@ -339,9 +350,19 @@ function App() {
             openingId={openingId}
             notice={notice}
             onOpen={handleOpen}
-            onDelete={handleDelete}
+            onDelete={handleDeleteRequest}
           />
         )}
+
+        <ConfirmDialog
+          open={pendingDeleteId !== null}
+          title={`Delete "${pendingDeleteLabel}"?`}
+          description="This can't be undone."
+          confirmLabel="Delete"
+          destructive
+          onConfirm={handleDeleteConfirm}
+          onCancel={handleDeleteCancel}
+        />
 
         {current && (
           <>

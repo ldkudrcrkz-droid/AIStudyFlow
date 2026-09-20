@@ -13,6 +13,13 @@ const API_URL = "";
 // limit does not apply. Keep in sync with the backend and the bucket.
 const MAX_UPLOAD_MB = 50;
 
+// If the direct-to-storage upload is blocked (seen on some mobile
+// browsers/networks — it's a cross-origin request to a different
+// domain), the file is sent through our own backend instead. That path
+// is limited by the server's request size, so it only takes smaller
+// files. Keep in sync with the backend's MAX_PROXY_UPLOAD_MB.
+const MAX_PROXY_UPLOAD_MB = 4;
+
 /* Created on first upload so a missing env var can't break the whole app. */
 function getStorageClient() {
   const url = import.meta.env.VITE_SUPABASE_URL;
@@ -68,22 +75,12 @@ async function request<T>(
    DOCUMENTS
 ========================= */
 
-/*
-  Upload a PDF in two steps:
-  1. Send it straight to Supabase Storage with a one-time signed URL.
-  2. Ask the server to analyze and save it.
-*/
-export async function uploadPdf(
+
+class DirectUploadFailedError extends Error {}
+
+async function uploadPdfDirect(
   file: File
 ): Promise<DocumentDetail> {
-  if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
-    const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
-
-    throw new Error(
-      `This PDF is ${sizeMb} MB. The limit is ${MAX_UPLOAD_MB} MB.`
-    );
-  }
-
   const storage = getStorageClient();
 
   const target = await request<{
@@ -113,7 +110,7 @@ export async function uploadPdf(
     });
 
   if (error) {
-    throw new Error(`Upload failed: ${error.message}`);
+    throw new DirectUploadFailedError(error.message);
   }
 
   return request<DocumentDetail>(
@@ -132,6 +129,70 @@ export async function uploadPdf(
     },
     "Failed to process PDF."
   );
+}
+
+
+async function uploadPdfViaBackend(
+  file: File
+): Promise<DocumentDetail> {
+  const formData = new FormData();
+
+  formData.append("file", file, file.name);
+
+  const response = await fetch(
+    `${API_URL}/api/upload-file`,
+    {
+      method: "POST",
+      body: formData,
+    }
+  );
+
+  const data = await response
+    .json()
+    .catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(
+      data.error || "Failed to process PDF."
+    );
+  }
+
+  return data as DocumentDetail;
+}
+
+export async function uploadPdf(
+  file: File
+): Promise<DocumentDetail> {
+  if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+    const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+
+    throw new Error(
+      `This PDF is ${sizeMb} MB. The limit is ${MAX_UPLOAD_MB} MB.`
+    );
+  }
+
+  try {
+    return await uploadPdfDirect(file);
+  } catch (err) {
+    if (!(err instanceof DirectUploadFailedError)) {
+      throw err;
+    }
+
+    console.warn(
+      "Direct upload failed, falling back to backend upload:",
+      err.message
+    );
+
+    if (file.size > MAX_PROXY_UPLOAD_MB * 1024 * 1024) {
+      const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+
+      throw new Error(
+        `Couldn't upload this PDF directly (your browser or network blocked it), and at ${sizeMb} MB it's too large for the backup upload method (max ${MAX_PROXY_UPLOAD_MB} MB). Try a different browser or network, or a smaller file.`
+      );
+    }
+
+    return uploadPdfViaBackend(file);
+  }
 }
 
 export async function listDocuments(): Promise<

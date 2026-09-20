@@ -1,6 +1,7 @@
 
 import express from "express";
 import cors from "cors";
+import multer from "multer";
 import { randomUUID } from "node:crypto";
 
 import { extractPdfPages } from "./pdf.js";
@@ -34,9 +35,7 @@ const app = express();
 
 const PORT = 3000;
 
-// PDFs are uploaded straight to Supabase Storage (not through this
-// server), so Vercel's 4.5 MB request limit does not apply. Keep this
-// in sync with the bucket's file size limit and the frontend.
+
 const MAX_UPLOAD_MB = 50;
 
 // Private Supabase Storage bucket that holds PDFs until they are processed.
@@ -44,6 +43,136 @@ const UPLOAD_BUCKET = "uploads";
 
 // Only ids this server generated are accepted as storage paths.
 const UPLOAD_PATH = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.pdf$/;
+
+const MAX_PROXY_UPLOAD_MB = 4;
+
+class UploadError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+
+async function processUploadedPdf(
+  buffer: Buffer,
+  filename: string
+) {
+  // Every real PDF starts with "%PDF-"
+  if (
+    buffer.subarray(0, 5).toString("latin1") !== "%PDF-"
+  ) {
+    throw new UploadError(
+      400,
+      "Only PDF files are supported"
+    );
+  }
+
+  /* =========================
+     EXTRACT TEXT
+  ========================= */
+
+  const pages = await extractPdfPages(buffer);
+
+  const text = pages.join("\n\n");
+
+  if (!text.trim()) {
+    throw new UploadError(
+      400,
+      "No readable text was found in the PDF."
+    );
+  }
+
+  console.log(
+    `Extracted ${text.length} characters`
+  );
+
+  /* =========================
+     CREATE CHUNKS
+  ========================= */
+
+  const chunks = chunkPages(pages);
+
+  console.log(
+    `Created ${chunks.length} document chunks`
+  );
+
+  const [embeddings, rawAnalysis] =
+    await Promise.all([
+      createEmbeddings(
+        chunks.map((chunk) => chunk.text)
+      ),
+      analyzeDocument(text),
+    ]);
+
+  const analysis = parseAnalysis(rawAnalysis);
+
+  console.log(
+    `Created ${embeddings.length} embeddings (${
+      embeddings[0]?.length ?? 0
+    } dimensions)`
+  );
+
+  /* =========================
+     STORE IN SUPABASE
+  ========================= */
+
+  const { data: document, error: documentError } =
+    await supabase
+      .from("documents")
+      .insert({
+        filename,
+        analysis,
+      })
+      .select(DOCUMENT_COLUMNS)
+      .single();
+
+  if (documentError || !document) {
+    throw new Error(
+      `Could not create document: ${documentError?.message}`
+    );
+  }
+
+  const rows = chunks.map((chunk, index) => ({
+    document_id: document.id,
+    chunk_index: chunk.id,
+    page: chunk.page,
+    content: chunk.text,
+    embedding: embeddings[index] ?? [],
+  }));
+
+  for (let i = 0; i < rows.length; i += 100) {
+    const { error: chunkError } = await supabase
+      .from("chunks")
+      .insert(rows.slice(i, i + 100));
+
+    if (chunkError) {
+      // Remove the half-saved document and any chunks
+      // that were already written
+      await supabase
+        .from("chunks")
+        .delete()
+        .eq("document_id", document.id);
+
+      await supabase
+        .from("documents")
+        .delete()
+        .eq("id", document.id);
+
+      throw new Error(
+        `Could not save chunks: ${chunkError.message}`
+      );
+    }
+  }
+
+  console.log(
+    `Saved document ${document.id} with ${rows.length} chunks`
+  );
+
+  return toDetail(document);
+}
 
 /* =========================
    MIDDLEWARE
@@ -68,13 +197,6 @@ app.get("/", (_req, res) => {
   });
 });
 
-/* =========================
-   PDF UPLOAD (2 steps)
-   1. The browser asks for a signed upload URL and sends
-      the PDF straight to Supabase Storage.
-   2. The browser tells us the path and we process the
-      file from storage.
-========================= */
 
 app.post(
   "/api/upload-url",
@@ -172,137 +294,19 @@ app.post(
         await blob.arrayBuffer()
       );
 
-      // Every real PDF starts with "%PDF-"
-      if (
-        buffer.subarray(0, 5).toString("latin1") !==
-        "%PDF-"
-      ) {
-        return res.status(400).json({
-          error:
-            "Only PDF files are supported",
-        });
-      }
-
-      /* =========================
-         EXTRACT TEXT
-      ========================= */
-
-      const pages =
-        await extractPdfPages(buffer);
-
-      const text = pages.join("\n\n");
-
-      if (!text.trim()) {
-        return res.status(400).json({
-          error:
-            "No readable text was found in the PDF.",
-        });
-      }
-
-      console.log(
-        `Extracted ${text.length} characters`
+      const result = await processUploadedPdf(
+        buffer,
+        filename
       );
 
-      /* =========================
-         CREATE CHUNKS
-      ========================= */
-
-      const chunks =
-        chunkPages(pages);
-
-      console.log(
-        `Created ${chunks.length} document chunks`
-      );
-
-      /* =========================
-         EMBEDDINGS + ANALYSIS
-         Independent of each other, so run
-         them at the same time.
-      ========================= */
-
-      const [embeddings, rawAnalysis] =
-        await Promise.all([
-          createEmbeddings(
-            chunks.map(
-              (chunk) => chunk.text
-            )
-          ),
-          analyzeDocument(text),
-        ]);
-
-      const analysis =
-        parseAnalysis(rawAnalysis);
-
-      console.log(
-        `Created ${embeddings.length} embeddings (${
-          embeddings[0]?.length ?? 0
-        } dimensions)`
-      );
-
-      /* =========================
-         STORE IN SUPABASE
-      ========================= */
-
-      const { data: document, error: documentError } =
-        await supabase
-          .from("documents")
-          .insert({
-            filename,
-            analysis,
-          })
-          .select(DOCUMENT_COLUMNS)
-          .single();
-
-      if (documentError || !document) {
-        throw new Error(
-          `Could not create document: ${documentError?.message}`
-        );
-      }
-
-      const rows = chunks.map((chunk, index) => ({
-        document_id: document.id,
-        chunk_index: chunk.id,
-        page: chunk.page,
-        content: chunk.text,
-        embedding: embeddings[index] ?? [],
-      }));
-
-      for (let i = 0; i < rows.length; i += 100) {
-        const { error: chunkError } = await supabase
-          .from("chunks")
-          .insert(rows.slice(i, i + 100));
-
-        if (chunkError) {
-          // Remove the half-saved document and any chunks
-          // that were already written
-          await supabase
-            .from("chunks")
-            .delete()
-            .eq("document_id", document.id);
-
-          await supabase
-            .from("documents")
-            .delete()
-            .eq("id", document.id);
-
-          throw new Error(
-            `Could not save chunks: ${chunkError.message}`
-          );
-        }
-      }
-
-      console.log(
-        `Saved document ${document.id} with ${rows.length} chunks`
-      );
-
-      /* =========================
-         RESPONSE
-      ========================= */
-
-      res.status(201).json(
-        toDetail(document)
-      );
+      res.status(201).json(result);
     } catch (error) {
+      if (error instanceof UploadError) {
+        return res.status(error.status).json({
+          error: error.message,
+        });
+      }
+
       console.error(
         "PDF processing error:",
         error
@@ -325,6 +329,73 @@ app.post(
           cleanupError
         );
       }
+    }
+  }
+);
+
+const proxyUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_PROXY_UPLOAD_MB * 1024 * 1024 },
+});
+
+app.post(
+  "/api/upload-file",
+
+  (req, res, next) => {
+    proxyUpload.single("file")(req, res, (err) => {
+      if (!err) {
+        return next();
+      }
+
+      if (
+        err instanceof multer.MulterError &&
+        err.code === "LIMIT_FILE_SIZE"
+      ) {
+        return res.status(400).json({
+          error: `This PDF is too large for this upload method. Maximum size is ${MAX_PROXY_UPLOAD_MB} MB.`,
+        });
+      }
+
+      next(err);
+    });
+  },
+
+  async (req, res) => {
+    const file = req.file;
+
+    if (!file) {
+      return res.status(400).json({
+        error: "No PDF file uploaded",
+      });
+    }
+
+    const filename =
+      (typeof file.originalname === "string"
+        ? file.originalname.trim().slice(0, 255)
+        : "") || "document.pdf";
+
+    try {
+      const result = await processUploadedPdf(
+        file.buffer,
+        filename
+      );
+
+      res.status(201).json(result);
+    } catch (error) {
+      if (error instanceof UploadError) {
+        return res.status(error.status).json({
+          error: error.message,
+        });
+      }
+
+      console.error(
+        "PDF processing error (fallback upload):",
+        error
+      );
+
+      res.status(500).json({
+        error: "Failed to process PDF",
+      });
     }
   }
 );
@@ -513,11 +584,6 @@ app.use(
   }
 );
 
-/* =========================
-   START SERVER
-   On Vercel the platform runs the app itself,
-   so only listen when running locally.
-========================= */
 
 if (!process.env.VERCEL) {
   app.listen(
