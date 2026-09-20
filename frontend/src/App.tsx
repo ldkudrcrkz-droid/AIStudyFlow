@@ -100,14 +100,9 @@ function App() {
         }
       })
       .catch((err) => {
-        if (!cancelled) {
-          setNotice(
-            errorMessage(
-              err,
-              "Could not load your documents."
-            )
-          );
-        }
+        // Not shown to the user: with nothing saved yet there is
+        // nothing to warn about, and uploading reports its own errors.
+        console.error("Could not load documents:", err);
       });
 
     return () => {

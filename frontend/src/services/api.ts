@@ -1,3 +1,5 @@
+import { createClient } from "@supabase/supabase-js";
+
 import type {
   DocumentDetail,
   DocumentSummary,
@@ -7,8 +9,25 @@ import type {
 // and Vercel routes /api to the backend in production.
 const API_URL = "";
 
-// Vercel rejects request bodies over 4.5 MB (keep in sync with the backend).
-const MAX_UPLOAD_MB = 4;
+// PDFs go straight to Supabase Storage, so Vercel's 4.5 MB request
+// limit does not apply. Keep in sync with the backend and the bucket.
+const MAX_UPLOAD_MB = 50;
+
+/* Created on first upload so a missing env var can't break the whole app. */
+function getStorageClient() {
+  const url = import.meta.env.VITE_SUPABASE_URL;
+  const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+  if (!url || !anonKey) {
+    throw new Error(
+      "Uploads are not configured (missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY)."
+    );
+  }
+
+  return createClient(url, anonKey, {
+    auth: { persistSession: false },
+  });
+}
 
 export type Source = {
   id: number;
@@ -49,7 +68,11 @@ async function request<T>(
    DOCUMENTS
 ========================= */
 
-/* Upload a PDF. The server analyzes and saves it. */
+/*
+  Upload a PDF in two steps:
+  1. Send it straight to Supabase Storage with a one-time signed URL.
+  2. Ask the server to analyze and save it.
+*/
 export async function uploadPdf(
   file: File
 ): Promise<DocumentDetail> {
@@ -61,17 +84,53 @@ export async function uploadPdf(
     );
   }
 
-  const formData = new FormData();
+  const storage = getStorageClient();
 
-  formData.append("file", file);
+  const target = await request<{
+    bucket: string;
+    path: string;
+    token: string;
+  }>(
+    "/api/upload-url",
+    {
+      method: "POST",
+
+      headers: {
+        "Content-Type": "application/json",
+      },
+
+      body: JSON.stringify({
+        filename: file.name,
+      }),
+    },
+    "Could not start the upload."
+  );
+
+  const { error } = await storage.storage
+    .from(target.bucket)
+    .uploadToSignedUrl(target.path, target.token, file, {
+      contentType: "application/pdf",
+    });
+
+  if (error) {
+    throw new Error(`Upload failed: ${error.message}`);
+  }
 
   return request<DocumentDetail>(
     "/api/upload",
     {
       method: "POST",
-      body: formData,
+
+      headers: {
+        "Content-Type": "application/json",
+      },
+
+      body: JSON.stringify({
+        path: target.path,
+        filename: file.name,
+      }),
     },
-    "Failed to upload PDF."
+    "Failed to process PDF."
   );
 }
 

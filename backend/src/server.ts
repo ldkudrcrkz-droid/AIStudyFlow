@@ -2,7 +2,7 @@ import "dotenv/config";
 
 import express from "express";
 import cors from "cors";
-import multer from "multer";
+import { randomUUID } from "node:crypto";
 
 import { extractPdfPages } from "./pdf.js";
 
@@ -35,8 +35,16 @@ const app = express();
 
 const PORT = 3000;
 
-// Vercel rejects request bodies over 4.5 MB, so stay safely under it.
-const MAX_UPLOAD_MB = 4;
+// PDFs are uploaded straight to Supabase Storage (not through this
+// server), so Vercel's 4.5 MB request limit does not apply. Keep this
+// in sync with the bucket's file size limit and the frontend.
+const MAX_UPLOAD_MB = 50;
+
+// Private Supabase Storage bucket that holds PDFs until they are processed.
+const UPLOAD_BUCKET = "uploads";
+
+// Only ids this server generated are accepted as storage paths.
+const UPLOAD_PATH = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.pdf$/;
 
 /* =========================
    MIDDLEWARE
@@ -50,15 +58,6 @@ app.use(
 
 app.use(express.json());
 
-const upload = multer({
-  storage: multer.memoryStorage(),
-
-  limits: {
-    fileSize:
-      MAX_UPLOAD_MB * 1024 * 1024,
-  },
-});
-
 /* =========================
    ROOT
 ========================= */
@@ -71,25 +70,113 @@ app.get("/", (_req, res) => {
 });
 
 /* =========================
-   PDF UPLOAD
+   PDF UPLOAD (2 steps)
+   1. The browser asks for a signed upload URL and sends
+      the PDF straight to Supabase Storage.
+   2. The browser tells us the path and we process the
+      file from storage.
 ========================= */
 
 app.post(
-  "/api/upload",
-  upload.single("file"),
+  "/api/upload-url",
 
   async (req, res) => {
     try {
-      if (!req.file) {
+      const filename =
+        typeof req.body?.filename === "string"
+          ? req.body.filename
+          : "";
+
+      if (!filename.toLowerCase().endsWith(".pdf")) {
         return res.status(400).json({
           error:
-            "No PDF file uploaded",
+            "Only PDF files are supported",
         });
       }
 
+      const path = `${randomUUID()}.pdf`;
+
+      const { data, error } =
+        await supabase.storage
+          .from(UPLOAD_BUCKET)
+          .createSignedUploadUrl(path);
+
+      if (error || !data) {
+        throw new Error(
+          `Could not create upload URL: ${error?.message}`
+        );
+      }
+
+      res.json({
+        bucket: UPLOAD_BUCKET,
+        path: data.path,
+        token: data.token,
+      });
+    } catch (error) {
+      console.error(
+        "Upload URL error:",
+        error
+      );
+
+      res.status(500).json({
+        error:
+          "Could not start the upload",
+      });
+    }
+  }
+);
+
+app.post(
+  "/api/upload",
+
+  async (req, res) => {
+    const path = req.body?.path;
+
+    if (
+      typeof path !== "string" ||
+      !UPLOAD_PATH.test(path)
+    ) {
+      return res.status(400).json({
+        error: "No PDF file uploaded",
+      });
+    }
+
+    const filename =
+      (typeof req.body?.filename === "string"
+        ? req.body.filename.trim().slice(0, 255)
+        : "") || "document.pdf";
+
+    try {
+      /* =========================
+         LOAD FILE FROM STORAGE
+      ========================= */
+
+      const { data: blob, error: downloadError } =
+        await supabase.storage
+          .from(UPLOAD_BUCKET)
+          .download(path);
+
+      if (downloadError || !blob) {
+        return res.status(400).json({
+          error:
+            "The uploaded file could not be found. Please try again.",
+        });
+      }
+
+      if (blob.size > MAX_UPLOAD_MB * 1024 * 1024) {
+        return res.status(400).json({
+          error: `PDF file is too large. Maximum size is ${MAX_UPLOAD_MB} MB.`,
+        });
+      }
+
+      const buffer = Buffer.from(
+        await blob.arrayBuffer()
+      );
+
+      // Every real PDF starts with "%PDF-"
       if (
-        req.file.mimetype !==
-        "application/pdf"
+        buffer.subarray(0, 5).toString("latin1") !==
+        "%PDF-"
       ) {
         return res.status(400).json({
           error:
@@ -102,9 +189,7 @@ app.post(
       ========================= */
 
       const pages =
-        await extractPdfPages(
-          req.file.buffer
-        );
+        await extractPdfPages(buffer);
 
       const text = pages.join("\n\n");
 
@@ -163,7 +248,7 @@ app.post(
         await supabase
           .from("documents")
           .insert({
-            filename: req.file.originalname,
+            filename,
             analysis,
           })
           .select(DOCUMENT_COLUMNS)
@@ -228,6 +313,19 @@ app.post(
         error:
           "Failed to process PDF",
       });
+    } finally {
+      // The text and embeddings are saved in the database,
+      // so the original PDF is no longer needed.
+      try {
+        await supabase.storage
+          .from(UPLOAD_BUCKET)
+          .remove([path]);
+      } catch (cleanupError) {
+        console.error(
+          "Could not delete uploaded PDF:",
+          cleanupError
+        );
+      }
     }
   }
 );
@@ -394,7 +492,7 @@ app.post(
 );
 
 /* =========================
-   MULTER / SERVER ERRORS
+   SERVER ERRORS
 ========================= */
 
 app.use(
@@ -408,21 +506,6 @@ app.use(
       "Server error:",
       error
     );
-
-    if (
-      error instanceof
-      multer.MulterError
-    ) {
-      if (
-        error.code ===
-        "LIMIT_FILE_SIZE"
-      ) {
-        return res.status(400).json({
-          error:
-            `PDF file is too large. Maximum size is ${MAX_UPLOAD_MB} MB.`,
-        });
-      }
-    }
 
     res.status(500).json({
       error:
