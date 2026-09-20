@@ -3,7 +3,12 @@ import type {
   DocumentSummary,
 } from "../types/document";
 
-const API_URL = "http://localhost:3000";
+// Same origin: Vite proxies /api to the backend in development,
+// and Vercel routes /api to the backend in production.
+const API_URL = "";
+
+// Vercel rejects request bodies over 4.5 MB (keep in sync with the backend).
+const MAX_UPLOAD_MB = 4;
 
 export type Source = {
   id: number;
@@ -45,9 +50,17 @@ async function request<T>(
 ========================= */
 
 /* Upload a PDF. The server analyzes and saves it. */
-export function uploadPdf(
+export async function uploadPdf(
   file: File
 ): Promise<DocumentDetail> {
+  if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+    const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+
+    throw new Error(
+      `This PDF is ${sizeMb} MB. The limit is ${MAX_UPLOAD_MB} MB.`
+    );
+  }
+
   const formData = new FormData();
 
   formData.append("file", file);

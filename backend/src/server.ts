@@ -35,6 +35,9 @@ const app = express();
 
 const PORT = 3000;
 
+// Vercel rejects request bodies over 4.5 MB, so stay safely under it.
+const MAX_UPLOAD_MB = 4;
+
 /* =========================
    MIDDLEWARE
 ========================= */
@@ -52,7 +55,7 @@ const upload = multer({
 
   limits: {
     fileSize:
-      50 * 1024 * 1024,
+      MAX_UPLOAD_MB * 1024 * 1024,
   },
 });
 
@@ -416,7 +419,7 @@ app.use(
       ) {
         return res.status(400).json({
           error:
-            "PDF file is too large. Maximum size is 50 MB.",
+            `PDF file is too large. Maximum size is ${MAX_UPLOAD_MB} MB.`,
         });
       }
     }
@@ -430,13 +433,19 @@ app.use(
 
 /* =========================
    START SERVER
+   On Vercel the platform runs the app itself,
+   so only listen when running locally.
 ========================= */
 
-app.listen(
-  PORT,
-  () => {
-    console.log(
-      `StudyFlow AI backend running on http://localhost:${PORT}`
-    );
-  }
-);
+if (!process.env.VERCEL) {
+  app.listen(
+    PORT,
+    () => {
+      console.log(
+        `StudyFlow AI backend running on http://localhost:${PORT}`
+      );
+    }
+  );
+}
+
+export default app;
