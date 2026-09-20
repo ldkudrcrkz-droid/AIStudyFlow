@@ -103,8 +103,7 @@ function App() {
         }
       })
       .catch((err) => {
-        // Not shown to the user: with nothing saved yet there is
-        // nothing to warn about, and uploading reports its own errors.
+      
         console.error("Could not load documents:", err);
       });
 
@@ -113,14 +112,38 @@ function App() {
     };
   }, []);
 
-  const handleFileChange = (
+  const handleFileChange = async (
     event: React.ChangeEvent<HTMLInputElement>
   ) => {
-    setFile(
-      event.target.files?.[0] ?? null
-    );
+    const input = event.target;
+    const picked = input.files?.[0] ?? null;
 
     setError("");
+
+    if (!picked) {
+      setFile(null);
+      return;
+    }
+
+  
+    try {
+      const bytes = await picked.arrayBuffer();
+
+      setFile(
+        new File([bytes], picked.name, {
+          type: "application/pdf",
+        })
+      );
+    } catch {
+      setFile(null);
+
+      setError(
+        "Your phone couldn't read this file. Save it to your device (e.g. Downloads) and choose it again."
+      );
+    } finally {
+      // Lets the same file be picked again after an error.
+      input.value = "";
+    }
   };
 
   const handleUpload = async () => {
