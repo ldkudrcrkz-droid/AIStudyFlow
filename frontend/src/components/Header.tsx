@@ -1,7 +1,7 @@
 function Header() {
   return (
     <header className="header">
-      <span className="wordmark">StudyFlow</span>
+      <span className="wordmark">StudyReader</span>
     </header>
   );
 }
